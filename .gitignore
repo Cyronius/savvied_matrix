@@ -1,0 +1,16 @@
+# Build output
+bin/
+obj/
+dist/
+
+# Planning, and the generated artifacts from inspecting renders
+.claude/plans/
+.claude/render-check/
+.claude/run-capture*/
+.claude/photo-*/
+
+# Dropbox credentials and runtime state: never commit these
+token.json
+cache/
+SavviedMatrix.log
+SavviedMatrix.log.1

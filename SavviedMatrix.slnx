@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/specs/" />
+  <Folder Name="/specs/matrix/" />
+  <Folder Name="/specs/matrix/tests/">
+    <Project Path="specs/matrix/tests/SavviedMatrix.Tests.csproj" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/SavviedMatrix/SavviedMatrix.csproj" />
+  </Folder>
+</Solution>

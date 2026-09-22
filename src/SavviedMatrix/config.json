@@ -1,0 +1,32 @@
+{
+  "dropbox": {
+    "appKey": "gdnsdmn530r6kex",
+    "folder": ""
+  },
+  "displaySeconds": 10,
+  "columns": 320,
+  "glyphMode": "dense",
+  "equalize": 0.8,
+  "detail": 0.0,
+  "colorBoost": 1.0,
+  "dither": 0.15,
+  "palette": "ansi",
+  "gamma": 1.0,
+  "cache": {
+    "maxFiles": 200
+  },
+  "rain": {
+    "enabled": true,
+    "fps": 24,
+    "seconds": 3
+  },
+  "sound": {
+    "enabled": true,
+    "volume": 0.9,
+    "bands": 16,
+    "polyphony": 8,
+    "scale": "major",
+    "staticStrum": true,
+    "latencyMs": 60
+  }
+}
