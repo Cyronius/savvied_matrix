@@ -2,20 +2,35 @@
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net10.0-windows</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
-    <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <!-- Physical pixels, so the grid matches the panel rather than the scaling factor. -->
-    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <RootNamespace>SavviedMatrix</RootNamespace>
     <AssemblyName>SavviedMatrix</AssemblyName>
     <InvariantGlobalization>true</InvariantGlobalization>
+    <BuiltInComInteropSupport>false</BuiltInComInteropSupport>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- Avalonia draws the whole surface itself; the default compiled-binding warnings
+         do not apply to a code-only UI with no XAML views. -->
+    <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="NAudio" Version="3.1.0" />
+    <!-- UI: Avalonia replaces WinForms on every platform rather than only on macOS,
+         so there is one window implementation to reason about and to test. -->
+    <PackageReference Include="Avalonia" Version="12.1.2" />
+    <PackageReference Include="Avalonia.Desktop" Version="12.1.2" />
+    <PackageReference Include="Avalonia.Themes.Simple" Version="12.1.2" />
+
+    <!-- Image decode, EXIF orientation, downsampling and glyph rasterising. Skia ships
+         with Avalonia, so the whole GDI+ surface is replaced without adding a native
+         dependency, and it is MIT licensed with no commercial terms to satisfy. -->
+    <PackageReference Include="SkiaSharp" Version="4.152.1" />
+
+    <!-- Audio transport. miniaudio underneath: CoreAudio on macOS, WASAPI on Windows,
+         ALSA/PulseAudio on Linux, with the native library carried in the package. -->
+    <PackageReference Include="SoundFlow" Version="1.4.1" />
   </ItemGroup>
 
   <ItemGroup>

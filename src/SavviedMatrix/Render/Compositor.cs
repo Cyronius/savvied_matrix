@@ -1,6 +1,4 @@
 using System.Drawing;
-using System.Drawing.Imaging;
-using System.Runtime.InteropServices;
 using SavviedMatrix.Core;
 
 namespace SavviedMatrix.Render;
@@ -9,12 +7,16 @@ namespace SavviedMatrix.Render;
 /// Owns the screen-sized pixel buffer and stamps glyph blocks into it.
 /// Only cells whose glyph or colour actually changed are touched, which is what makes a
 /// rain frame cost a couple of thousand small copies rather than a full repaint.
+/// <para>
+/// The buffer is a plain managed array of 0xAARRGGBB ints and nothing here knows how it
+/// reaches the screen. On a little-endian machine that layout is byte-for-byte BGRA, which
+/// is what every windowing backend wants, so presenting a frame stays a straight memory
+/// copy with no conversion pass.
+/// </para>
 /// </summary>
-public sealed class Compositor : IDisposable
+public sealed class Compositor
 {
     private readonly int[] _pixels;
-    private GCHandle _handle;
-    private readonly Bitmap _surface;
     private readonly GridGeometry _geometry;
     private readonly GlyphAtlas _atlas;
 
@@ -23,7 +25,11 @@ public sealed class Compositor : IDisposable
     private readonly byte[] _lastLower;
     private bool _forceFull = true;
 
-    public Bitmap Surface => _surface;
+    /// <summary>The screen-sized ARGB buffer, row-major and tightly packed.</summary>
+    public int[] Pixels => _pixels;
+
+    public int Width => _geometry.ScreenWidth;
+    public int Height => _geometry.ScreenHeight;
 
     public Compositor(GridGeometry geometry, GlyphAtlas atlas)
     {
@@ -32,14 +38,6 @@ public sealed class Compositor : IDisposable
 
         _pixels = new int[geometry.ScreenWidth * geometry.ScreenHeight];
         Array.Fill(_pixels, unchecked((int)0xFF000000));
-
-        _handle = GCHandle.Alloc(_pixels, GCHandleType.Pinned);
-        _surface = new Bitmap(
-            geometry.ScreenWidth,
-            geometry.ScreenHeight,
-            geometry.ScreenWidth * 4,
-            PixelFormat.Format32bppPArgb,
-            _handle.AddrOfPinnedObject());
 
         _lastGlyph = new byte[geometry.CellCount];
         _lastColour = new byte[geometry.CellCount];
@@ -116,11 +114,5 @@ public sealed class Compositor : IDisposable
         int h = (maxRow - minRow + 1) * cellH;
 
         return new Rectangle(x, y0, w, h);
-    }
-
-    public void Dispose()
-    {
-        _surface.Dispose();
-        if (_handle.IsAllocated) _handle.Free();
     }
 }

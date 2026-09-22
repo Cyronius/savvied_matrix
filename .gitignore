@@ -14,3 +14,7 @@ token.json
 cache/
 SavviedMatrix.log
 SavviedMatrix.log.1
+
+# macOS
+.DS_Store
+build/*.app

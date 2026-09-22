@@ -1,4 +1,7 @@
 using System.Diagnostics;
+using Avalonia;
+using Avalonia.Controls;
+using Avalonia.Threading;
 using SavviedMatrix.Ascii;
 using SavviedMatrix.Audio;
 using SavviedMatrix.Core;
@@ -16,11 +19,46 @@ internal static class Program
     private const int ExitNoToken = 2;
     private const int ExitFailed = 3;
 
-    [STAThread]
+    /// <summary>
+    /// Avalonia has to be configured before any control is touched, and the viewer needs the
+    /// screen size before it can build a grid, so everything real happens inside
+    /// <see cref="Run"/> once the toolkit is up.
+    /// </summary>
     private static int Main(string[] args)
     {
-        ApplicationConfiguration.Initialize();
+        int exit = ExitFailed;
 
+        // Before the toolkit, not after. A display that is already asleep is not in the
+        // window server's active list, and the renderer's frame clock is built from that
+        // list, so a kiosk starting on an idle machine would otherwise fail outright.
+        KeepAwake.Engage();
+
+        try
+        {
+            BuildAvaloniaApp().Start((_, _) => exit = Run(args), args);
+        }
+        catch (Exception ex)
+        {
+            Log.Error("Fatal", ex);
+            Console.Error.WriteLine($"{ex.GetType().Name}: {ex.Message}");
+            return ExitFailed;
+        }
+        finally
+        {
+            KeepAwake.Release();
+        }
+
+        return exit;
+    }
+
+    /// <summary>Also used by the Avalonia previewer and design tooling, which looks for this name.</summary>
+    public static AppBuilder BuildAvaloniaApp()
+        => AppBuilder.Configure<App>()
+            .UsePlatformDetect()
+            .LogToTrace();
+
+    private static int Run(string[] args)
+    {
         var config = AppConfig.Load();
 
         if (!config.ApplyArgs(args, out var error))
@@ -45,10 +83,6 @@ internal static class Program
             Log.Error("Fatal", ex);
             Message($"{ex.GetType().Name}: {ex.Message}", "SavviedMatrix failed");
             return ExitFailed;
-        }
-        finally
-        {
-            KeepAwake.Release();
         }
     }
 
@@ -82,8 +116,10 @@ internal static class Program
             Message($"Open this address manually:\n\n{url}", "Dropbox authorization");
         }
 
-        using var dialog = new AuthDialog();
-        if (dialog.ShowDialog() != DialogResult.OK || string.IsNullOrWhiteSpace(dialog.Code))
+        var dialog = new AuthDialog();
+        RunWindow(dialog);
+
+        if (string.IsNullOrWhiteSpace(dialog.Code))
         {
             Log.Info("Authorization cancelled.");
             return ExitUsage;
@@ -103,7 +139,7 @@ internal static class Program
             Log.Info("Dropbox authorization saved.");
             Message(
                 $"Saved to {DropboxTokenStore.TokenPath}.\n\n"
-                + "Copy this file to the display PC alongside the executable.",
+                + "Copy this file to the same folder on the display machine.",
                 "Authorized");
 
             return ExitOk;
@@ -136,17 +172,15 @@ internal static class Program
                 Log.Error($"No token.json at {DropboxTokenStore.TokenPath}; run --auth first.");
                 Message(
                     "No Dropbox authorization found.\n\n"
-                    + "Run SavviedMatrix.exe --auth once, then copy token.json next to the "
-                    + "executable on this machine.",
+                    + "Run SavviedMatrix --auth once, then copy token.json to:\n\n"
+                    + $"{AppPaths.DataDirectory}",
                     "Not authorized");
                 return ExitNoToken;
             }
 
             http = new HttpClient();
             var client = new DropboxClient(http, config.Dropbox.AppKey, token);
-            var cache = new ImageCache(
-                Path.Combine(AppContext.BaseDirectory, "cache"),
-                config.Cache.MaxFiles);
+            var cache = new ImageCache(AppPaths.Combine("cache"), config.Cache.MaxFiles);
 
             source = new DropboxSource(client, cache, config.Dropbox.Folder);
             Log.Info($"Reading images from {source.Description}.");
@@ -154,16 +188,18 @@ internal static class Program
 
         try
         {
-            var screen = config.WindowSize
-                ?? Screen.PrimaryScreen?.Bounds.Size
-                ?? new Size(1920, 1080);
+            var (screenWidth, screenHeight, scaling) = ScreenInfo.Primary();
 
-            var geometry = new GridGeometry(screen.Width, screen.Height, config.Columns);
+            int width = config.WindowSize?.Width ?? screenWidth;
+            int height = config.WindowSize?.Height ?? screenHeight;
+
+            var geometry = new GridGeometry(width, height, config.Columns);
             var glyphs = new GlyphSet();
             var palette = new Palette(Palette.ParseMode(config.Palette));
 
             Log.Info(
-                $"Screen {screen.Width}x{screen.Height}, "
+                $"Screen {screenWidth}x{screenHeight} at {scaling:0.##}x, "
+                + $"surface {width}x{height}, "
                 + $"grid {geometry.Cols}x{geometry.Rows}, "
                 + $"cells {geometry.CellWidth}x{geometry.CellHeight}px, "
                 + $"{config.GlyphMode} glyphs, {palette.Mode.ToString().ToLowerInvariant()} palette, "
@@ -179,11 +215,10 @@ internal static class Program
             glyphs.Calibrate(atlas.Coverage, atlas.CentroidY);
             var audio = AudioOutput.Create(config.Sound);
 
-            using var form = new MatrixForm(
+            var window = new MatrixWindow(
                 config, geometry, glyphs, atlas, palette, source, audio, new Random());
 
-            KeepAwake.Engage();
-            Application.Run(form);
+            RunWindow(window);
 
             return ExitOk;
         }
@@ -193,6 +228,38 @@ internal static class Program
         }
     }
 
+    /// <summary>
+    /// Shows a window and pumps the dispatcher until it closes, which is what running a
+    /// window to completion means now that the toolkit no longer offers it directly. Used
+    /// for the viewer and for each dialog in turn, so the whole app is a sequence of
+    /// windows rather than a lifetime object with one main window.
+    /// </summary>
+    private static void RunWindow(Window window)
+    {
+        using var cts = new CancellationTokenSource();
+
+        window.Closed += (_, _) => cts.Cancel();
+        window.Show();
+
+        Dispatcher.UIThread.MainLoop(cts.Token);
+    }
+
+    /// <summary>
+    /// Shows a message and waits for it to be dismissed. Also written to the log, so a
+    /// headless or unattended run still records why it stopped.
+    /// </summary>
     private static void Message(string text, string caption)
-        => MessageBox.Show(text, caption, MessageBoxButtons.OK, MessageBoxIcon.Information);
+    {
+        Log.Info($"{caption}: {text.ReplaceLineEndings(" ")}");
+        Console.WriteLine($"{caption}\n\n{text}\n");
+
+        try
+        {
+            RunWindow(new MessageWindow(text, caption));
+        }
+        catch (Exception ex)
+        {
+            Log.Warn($"Could not show the message window: {ex.Message}");
+        }
+    }
 }

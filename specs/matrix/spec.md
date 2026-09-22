@@ -4,7 +4,8 @@
 **Requirement prefix:** `MATRIX`
 **Tests:** `specs/matrix/tests` (xUnit, `dotnet test`)
 
-A Windows executable that runs unattended on a 1080p television driven by a low-power PC
+A desktop application that runs unattended on a 1080p television driven by a low-power
+machine (Windows, macOS or Linux)
 with no Dropbox desktop client. It pulls images from a Dropbox app folder over the Dropbox
 API and cycles through them as ASCII art on black, optionally handing over from one image
 to the next in a single pass of Matrix digital rain, with synthesized plinks whose pitch
@@ -18,7 +19,7 @@ comes from the colours of the image.
 **Applies to:** savvied_matrix
 **Verification:** manual
 
-`SavviedMatrix.exe --auth` shall run the OAuth 2 PKCE flow against Dropbox with
+`SavviedMatrix --auth` shall run the OAuth 2 PKCE flow against Dropbox with
 `token_access_type=offline` and no `redirect_uri`, and write the resulting refresh token to
 `token.json` beside the executable. Starting the viewer without `token.json` and without
 `--folder` shall show a message naming `--auth` and exit with code 2.
@@ -27,7 +28,7 @@ The app secret shall never be required, stored or transmitted.
 
 **Verification (manual):**
 1. Put the app key in `config.json` under `dropbox.appKey`.
-2. Run `SavviedMatrix.exe --auth`. The default browser opens the Dropbox consent page.
+2. Run `SavviedMatrix --auth`. The default browser opens the Dropbox consent page.
 3. Click Allow, copy the code, paste it into the dialog, click OK.
 4. Confirm `token.json` appears beside the executable and contains a `refreshToken`.
 5. Rename `token.json` aside and run the viewer with no arguments: it reports that it is
@@ -98,7 +99,7 @@ pictures.
 `--folder <path>` shall read images from a local directory instead of Dropbox, bypassing
 authorization and the cache entirely.
 
-**Verification (manual):** `SavviedMatrix.exe --folder .\testimages --size 1280x720` shows
+**Verification (manual):** `SavviedMatrix --folder ./testimages --size 1280x720` shows
 the test images without needing `token.json`.
 
 ---
@@ -281,7 +282,8 @@ swap shows no blank frame; when the next image is not ready in time, the current
 up longer rather than the screen going black.
 
 **Verification (manual):**
-1. Run with no arguments on the display PC. The picture covers the taskbar; no cursor.
+1. Run with no arguments on the display machine. The picture covers the taskbar, Dock or
+   menu bar; no cursor.
 2. Time three transitions against a watch: each is about 10 seconds.
 3. Watch a transition closely: there is no black flash or stutter.
 4. Press a key, then run again and click the mouse. Both exit immediately.
@@ -425,7 +427,7 @@ the measured cost is logged rather than assumed.
    screen is never fully black between two images.
 2. Confirm `SavviedMatrix.log` reports the frames and the average compose-and-paint time
    for each transition, against the frame budget.
-3. If the average approaches the budget on the display PC, reduce `rain.fps` to 15 or
+3. If the average approaches the budget on the display machine, reduce `rain.fps` to 15 or
    `columns` to 128 and re-measure.
 
 ### MATRIX-RAIN-FIELD: The rain model
@@ -557,7 +559,7 @@ discontinuity is exactly what a listener reports as crackle.
 2. Show a strongly coloured test image and a greyscale one; confirm the first plays a spread
    of pitches and the second plays one repeated note.
 3. Run with `--mute` and confirm silence and no audio entry in the log.
-4. Disable the audio device in Windows, run again, and confirm the visuals are unaffected
+4. Disable the audio device in the operating system, run again, and confirm the visuals are unaffected
    and the log records the fallback.
 
 ---

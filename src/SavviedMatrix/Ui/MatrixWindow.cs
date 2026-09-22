@@ -1,6 +1,9 @@
 using System.Diagnostics;
-using System.Drawing;
-using System.Drawing.Drawing2D;
+using Avalonia;
+using Avalonia.Controls;
+using Avalonia.Input;
+using Avalonia.Media;
+using Avalonia.Threading;
 using SavviedMatrix.Ascii;
 using SavviedMatrix.Audio;
 using SavviedMatrix.Core;
@@ -14,9 +17,9 @@ namespace SavviedMatrix.Ui;
 /// The display loop. Holds the phase machine, the prefetch of the next image, and the
 /// hand-off of scheduled notes to the synthesizer.
 /// Nothing here decodes, downloads or analyses anything: the UI thread only composes
-/// pixels and blits them.
+/// pixels and uploads them.
 /// </summary>
-public sealed class MatrixForm : Form
+public sealed class MatrixWindow : Window
 {
     private enum Phase
     {
@@ -33,7 +36,6 @@ public sealed class MatrixForm : Form
     private readonly AppConfig _config;
     private readonly GridGeometry _geometry;
     private readonly GlyphSet _glyphs;
-    private readonly GlyphAtlas _atlas;
     private readonly Palette _palette;
     private readonly Compositor _compositor;
     private readonly RainCompositor _rain;
@@ -41,7 +43,8 @@ public sealed class MatrixForm : Form
     private readonly IImageSource _source;
     private readonly Playlist<ImageRef> _playlist;
     private readonly IAudioOutput _audio;
-    private readonly System.Windows.Forms.Timer _timer;
+    private readonly RainSurface _surface;
+    private readonly DispatcherTimer _timer;
     private readonly Stopwatch _phaseClock = new();
     private readonly CancellationTokenSource _cts = new();
     private readonly Random _rng;
@@ -60,7 +63,7 @@ public sealed class MatrixForm : Form
     private int _frameTimeSamples;
     private DateTime _lastEmptyNotice = DateTime.MinValue;
 
-    public MatrixForm(
+    public MatrixWindow(
         AppConfig config,
         GridGeometry geometry,
         GlyphSet glyphs,
@@ -73,7 +76,6 @@ public sealed class MatrixForm : Form
         _config = config;
         _geometry = geometry;
         _glyphs = glyphs;
-        _atlas = atlas;
         _palette = palette;
         _source = source;
         _audio = audio;
@@ -86,74 +88,68 @@ public sealed class MatrixForm : Form
         _playlist = new Playlist<ImageRef>(new Random(rng.Next()));
         _blank = new CellGrid(geometry.Cols, geometry.Rows, new GridPlacement(0, 0, 0, 0));
 
-        SetStyle(
-            ControlStyles.AllPaintingInWmPaint | ControlStyles.Opaque | ControlStyles.UserPaint,
-            true);
+        _surface = new RainSurface(geometry.ScreenWidth, geometry.ScreenHeight);
 
-        FormBorderStyle = FormBorderStyle.None;
-        BackColor = Palette.Background;
-        StartPosition = FormStartPosition.Manual;
-        Text = "SavviedMatrix";
-        KeyPreview = true;
+        Title = "SavviedMatrix";
+        Background = Brushes.Black;
+        Content = _surface;
+        ShowInTaskbar = false;
 
         if (config.WindowSize is { } size)
         {
-            Location = new Point(0, 0);
-            ClientSize = size;
+            // Preview: a borderless window of the requested pixel size. The size is in
+            // physical pixels like the grid, so it is converted on open, once the window
+            // knows which screen it is on and therefore what the scaling is.
+            CanResize = false;
+            WindowDecorations = WindowDecorations.BorderOnly;
+            WindowStartupLocation = WindowStartupLocation.CenterScreen;
+            Width = size.Width;
+            Height = size.Height;
         }
         else
         {
-            var bounds = Screen.PrimaryScreen?.Bounds ?? new Rectangle(0, 0, 1920, 1080);
-            Location = bounds.Location;
-            ClientSize = bounds.Size;
-            TopMost = true;
+            // Kiosk. Deliberately left resizable and decorated: macOS only lets a window
+            // that is both of those things enter real fullscreen, and a window that cannot
+            // silently stays whatever size it already was, leaving the picture cropped
+            // rather than failing outright. The decorations are gone once it is fullscreen,
+            // and nothing can reach the window to resize it.
+            CanResize = true;
+            WindowState = WindowState.FullScreen;
+            Topmost = true;
+            Cursor = new Cursor(StandardCursorType.None);
         }
 
-        _timer = new System.Windows.Forms.Timer
+        _timer = new DispatcherTimer
         {
-            Interval = _rainEnabled
-                ? Math.Max(8, 1000 / Math.Clamp(config.Rain.Fps, 1, 120))
-                : 100
+            Interval = TimeSpan.FromMilliseconds(
+                _rainEnabled
+                    ? Math.Max(8, 1000 / Math.Clamp(config.Rain.Fps, 1, 120))
+                    : 100)
         };
         _timer.Tick += (_, _) => Tick();
 
         ShowMessage("LOADING");
     }
 
-    protected override void OnShown(EventArgs e)
+    protected override void OnOpened(EventArgs e)
     {
-        base.OnShown(e);
+        base.OnOpened(e);
 
-        if (_config.WindowSize is null) Cursor.Hide();
+        if (_config.WindowSize is { } size)
+        {
+            // Now that the window is on a screen, express the requested pixel size in the
+            // units the layout uses, so --size 1600x900 is 1600x900 real pixels whatever
+            // the display's scale factor is.
+            double scaling = RenderScaling > 0 ? RenderScaling : 1.0;
+            Width = size.Width / scaling;
+            Height = size.Height / scaling;
+        }
+
+        Focus();
 
         _prefetch = StartPrefetch();
         _phaseClock.Restart();
         _timer.Start();
-    }
-
-    protected override void OnPaintBackground(PaintEventArgs e)
-    {
-        // The compositor's surface already covers every pixel.
-    }
-
-    protected override void OnPaint(PaintEventArgs e)
-    {
-        var clip = Rectangle.Intersect(
-            e.ClipRectangle,
-            new Rectangle(0, 0, _geometry.ScreenWidth, _geometry.ScreenHeight));
-
-        if (clip.Width <= 0 || clip.Height <= 0) return;
-
-        // The surface is fully opaque and drawn 1:1, so blending and interpolation are
-        // pure waste. SourceCopy turns the blit into a straight memory transfer, which
-        // is most of the per-frame cost during rain.
-        e.Graphics.CompositingMode = CompositingMode.SourceCopy;
-        e.Graphics.CompositingQuality = CompositingQuality.HighSpeed;
-        e.Graphics.InterpolationMode = InterpolationMode.NearestNeighbor;
-        e.Graphics.PixelOffsetMode = PixelOffsetMode.Half;
-        e.Graphics.SmoothingMode = SmoothingMode.None;
-
-        e.Graphics.DrawImage(_compositor.Surface, clip, clip, GraphicsUnit.Pixel);
     }
 
     // ---------------------------------------------------------------- phase machine
@@ -371,16 +367,19 @@ public sealed class MatrixForm : Form
     {
         var dirty = _compositor.Compose(_rain.Glyphs, _rain.Colours, _rain.Lowers);
         if (dirty.IsEmpty) return;
-        Invalidate(dirty);
-        Update();
+        _surface.Upload(_compositor.Pixels, dirty);
     }
 
     private void ShowMessage(params string[] lines)
     {
         var grid = GridText.Message(_geometry, _glyphs, _palette, lines);
         _rain.SetTarget(grid);
-        _compositor.Compose(_rain.Glyphs, _rain.Colours, _rain.Lowers);
-        Invalidate();
+        var dirty = _compositor.Compose(_rain.Glyphs, _rain.Colours, _rain.Lowers);
+        _surface.Upload(
+            _compositor.Pixels,
+            dirty.IsEmpty
+                ? new System.Drawing.Rectangle(0, 0, _geometry.ScreenWidth, _geometry.ScreenHeight)
+                : dirty);
     }
 
     private void ShowEmptyNotice()
@@ -420,7 +419,7 @@ public sealed class MatrixForm : Form
         double budget = 1000.0 / Math.Clamp(_config.Rain.Fps, 1, 120);
 
         Log.Info(
-            $"{phase}: {_frameTimeSamples} frames, {average:F1} ms average compose+paint, " +
+            $"{phase}: {_frameTimeSamples} frames, {average:F1} ms average compose+upload, " +
             $"{budget:F0} ms budget at {_config.Rain.Fps} fps.");
     }
 
@@ -432,9 +431,9 @@ public sealed class MatrixForm : Form
         BeginClose();
     }
 
-    protected override void OnMouseClick(MouseEventArgs e)
+    protected override void OnPointerPressed(PointerPressedEventArgs e)
     {
-        base.OnMouseClick(e);
+        base.OnPointerPressed(e);
         BeginClose();
     }
 
@@ -445,27 +444,21 @@ public sealed class MatrixForm : Form
         Close();
     }
 
-    protected override void OnFormClosing(FormClosingEventArgs e)
+    protected override void OnClosing(WindowClosingEventArgs e)
     {
         _closing = true;
         _timer.Stop();
         _cts.Cancel();
         _audio.Panic();
-        base.OnFormClosing(e);
+        base.OnClosing(e);
     }
 
-    protected override void Dispose(bool disposing)
+    protected override void OnClosed(EventArgs e)
     {
-        if (disposing)
-        {
-            _timer.Dispose();
-            _compositor.Dispose();
-            _atlas.Dispose();
-            _audio.Dispose();
-            _cts.Dispose();
-            if (_config.WindowSize is null) Cursor.Show();
-        }
+        _surface.DisposeBitmap();
+        _audio.Dispose();
+        _cts.Dispose();
 
-        base.Dispose(disposing);
+        base.OnClosed(e);
     }
 }

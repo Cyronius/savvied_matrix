@@ -1,8 +1,6 @@
-using System.Drawing;
-using System.Drawing.Imaging;
-using System.Drawing.Text;
 using SavviedMatrix.Ascii;
 using SavviedMatrix.Core;
+using SkiaSharp;
 
 namespace SavviedMatrix.Render;
 
@@ -178,28 +176,32 @@ public sealed class GlyphAtlas : IDisposable
         return _pixels.AsSpan(Offset(glyph, colour), _blockSize);
     }
 
+    /// <summary>
+    /// Rasterises every glyph once as a white-on-black coverage mask.
+    ///
+    /// Skia rather than GDI+, so the same code path runs on every platform and the masks
+    /// do not depend on which machine built them.
+    /// </summary>
     private static byte[][] RenderMasks(GlyphSet glyphs, int cellWidth, int cellHeight)
     {
         var masks = new byte[glyphs.Count][];
 
-        using var consolas = FitFont("Consolas", cellWidth, cellHeight, 'W');
-        using var gothic = FitFont("MS Gothic", cellWidth, cellHeight, 'ﾊ');
+        using var monoFace = FontChoice.Monospace();
+        using var katakanaFace = FontChoice.Katakana();
 
-        using var bitmap = new Bitmap(cellWidth, cellHeight, PixelFormat.Format32bppArgb);
-        using var g = Graphics.FromImage(bitmap);
-        using var white = new SolidBrush(Color.White);
-        using var black = new SolidBrush(Color.Black);
+        Log.Info($"Glyph atlas: {FontChoice.Describe(monoFace, katakanaFace)}.");
 
-        g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+        using var mono = FitFont(monoFace, cellWidth, cellHeight, 'W');
+        using var katakana = FitFont(katakanaFace, cellWidth, cellHeight, FontChoice.KatakanaSample);
 
-        using var format = new StringFormat(StringFormat.GenericTypographic)
-        {
-            Alignment = StringAlignment.Center,
-            LineAlignment = StringAlignment.Center,
-            FormatFlags = StringFormatFlags.NoWrap | StringFormatFlags.NoClip
-        };
+        // Drawing straight into a bitmap rather than a surface means the pixels are
+        // already in managed memory when the draw finishes, so each mask is one read
+        // rather than a render plus a copy back off the GPU.
+        var info = new SKImageInfo(cellWidth, cellHeight, SKColorType.Rgba8888, SKAlphaType.Opaque);
+        using var bitmap = new SKBitmap(info);
+        using var canvas = new SKCanvas(bitmap);
 
-        var rect = new RectangleF(0, 0, cellWidth, cellHeight);
+        using var white = new SKPaint { Color = SKColors.White, IsAntialias = true };
 
         for (int i = 0; i < glyphs.Count; i++)
         {
@@ -208,35 +210,32 @@ public sealed class GlyphAtlas : IDisposable
 
             if (c != ' ')
             {
-                g.FillRectangle(black, 0, 0, cellWidth, cellHeight);
-                var font = IsHalfWidthKatakana(c) ? gothic : consolas;
-                g.DrawString(c.ToString(), font, white, rect, format);
-                g.Flush();
+                canvas.Clear(SKColors.Black);
 
-                var data = bitmap.LockBits(
-                    new Rectangle(0, 0, cellWidth, cellHeight),
-                    ImageLockMode.ReadOnly,
-                    PixelFormat.Format32bppArgb);
-                try
-                {
-                    unsafe
-                    {
-                        byte* scan = (byte*)data.Scan0;
-                        for (int y = 0; y < cellHeight; y++)
-                        {
-                            byte* row = scan + y * data.Stride;
-                            for (int x = 0; x < cellWidth; x++)
-                            {
-                                // White on black: any channel is the coverage value.
-                                mask[y * cellWidth + x] = row[x * 4 + 1];
-                            }
-                        }
-                    }
-                }
-                finally
-                {
-                    bitmap.UnlockBits(data);
-                }
+                var font = IsHalfWidthKatakana(c) ? katakana : mono;
+                var text = c.ToString();
+
+                // Centre the em box in the cell: the advance horizontally, and the
+                // ascent-to-descent span vertically. Centring the ink instead would sit
+                // every glyph in the middle and destroy the vertical centroid the ramp
+                // builder uses to break ties.
+                //
+                // Ascent is negative here - it measures upwards from the baseline - so the
+                // em box is Descent minus Ascent, and the baseline sits that far below the
+                // top of the centred box.
+                var metrics = font.Metrics;
+                float advance = font.MeasureText(text);
+                float x = (cellWidth - advance) / 2f;
+                float baseline = (cellHeight - (metrics.Descent - metrics.Ascent)) / 2f - metrics.Ascent;
+
+                canvas.DrawText(text, x, baseline, SKTextAlign.Left, font, white);
+                canvas.Flush();
+
+                var pixels = bitmap.GetPixelSpan();
+
+                // White on black, so any colour channel is the coverage value.
+                for (int p = 0, n = cellWidth * cellHeight; p < n; p++)
+                    mask[p] = pixels[p * 4 + 1];
             }
 
             masks[i] = mask;
@@ -246,37 +245,43 @@ public sealed class GlyphAtlas : IDisposable
     }
 
     /// <summary>
-    /// Largest font that keeps a representative glyph inside the cell. Measured rather
-    /// than assumed, because font metrics vary and an overflowing glyph would smear
-    /// into its neighbours in the atlas.
+    /// Largest font size that keeps a representative glyph inside the cell. Measured rather
+    /// than assumed, because font metrics vary and an overflowing glyph would smear into its
+    /// neighbours in the atlas.
     /// </summary>
-    private static Font FitFont(string family, int cellWidth, int cellHeight, char sample)
+    private static SKFont FitFont(SKTypeface face, int cellWidth, int cellHeight, char sample)
     {
         float size = cellHeight;
-        Font? best = null;
-
-        using var probe = new Bitmap(1, 1);
-        using var g = Graphics.FromImage(probe);
+        var text = sample.ToString();
 
         for (int attempt = 0; attempt < 48 && size >= 4f; attempt++)
         {
-            var font = new Font(family, size, FontStyle.Regular, GraphicsUnit.Pixel);
-            var measured = g.MeasureString(sample.ToString(), font, PointF.Empty, StringFormat.GenericTypographic);
+            var font = new SKFont(face, size) { Subpixel = true, Edging = SKFontEdging.Antialias };
 
-            if (measured.Width <= cellWidth && measured.Height <= cellHeight)
-            {
-                best = font;
-                break;
-            }
+            float advance = font.MeasureText(text);
+            var metrics = font.Metrics;
+            float emHeight = metrics.Descent - metrics.Ascent;
+
+            // The advance keeps neighbouring cells apart, and the em box keeps any glyph in
+            // the face inside its own cell. Measuring the em box rather than one sample's
+            // ink matters for the shading blocks: they fill their box exactly, so a fit
+            // judged on the ink of 'W' would let them overflow and smear into the next row.
+            if (advance <= cellWidth && emHeight <= cellHeight)
+                return font;
 
             font.Dispose();
             size -= Math.Max(0.5f, size * 0.06f);
         }
 
-        return best ?? new Font(family, Math.Max(4f, cellHeight * 0.7f), FontStyle.Regular, GraphicsUnit.Pixel);
+        return new SKFont(face, Math.Max(4f, cellHeight * 0.7f))
+        {
+            Subpixel = true,
+            Edging = SKFontEdging.Antialias
+        };
     }
 
     private static bool IsHalfWidthKatakana(char c) => c >= '｡' && c <= 'ﾟ';
+
 
     public void Dispose()
     {

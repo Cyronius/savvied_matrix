@@ -1,11 +1,12 @@
 # SavviedMatrix
 
-A Windows slideshow that renders images as sixteen-colour ASCII art on a television.
-Images come from a Dropbox app folder over the API, so the display PC needs no Dropbox
-client installed. Optionally each image hands over to the next in a single pass of Matrix
-digital rain, with synthesized plinks whose pitch comes from the colours of the image.
+A slideshow that renders images as sixteen-colour ASCII art on a television. Images come
+from a Dropbox app folder over the API, so the display machine needs no Dropbox client
+installed. Optionally each image hands over to the next in a single pass of Matrix digital
+rain, with synthesized plinks whose pitch comes from the colours of the image.
 
-Requirements live in [specs/matrix/spec.md](specs/matrix/spec.md).
+Runs on macOS, Windows and Linux from one codebase. Requirements live in
+[specs/matrix/spec.md](specs/matrix/spec.md).
 
 ## Setting it up
 
@@ -14,11 +15,12 @@ https://www.dropbox.com/developers/apps with **Scoped access**, **App folder**, 
 `files.metadata.read` and `files.content.read` permissions. Set the permissions before you
 authorize, or the token will be issued without them.
 
-1. Put the key in `config.json` beside the executable, under `dropbox.appKey`.
-2. Run `SavviedMatrix.exe --auth` on any PC you can use a browser on. Click Allow, paste the
-   code into the dialog. This writes `token.json` beside the executable.
-3. Copy `SavviedMatrix.exe`, `config.json` and `token.json` to the display PC. The refresh
-   token is not tied to a machine, so the kiosk never needs a browser.
+1. Put the key in `config.json` (see [Where the files live](#where-the-files-live)), under
+   `dropbox.appKey`.
+2. Run `SavviedMatrix --auth` on any machine you can use a browser on. Click Allow, paste
+   the code into the dialog. This writes `token.json` into the data directory.
+3. Copy `config.json` and `token.json` to the display machine. The refresh token is not tied
+   to a machine, so the kiosk never needs a browser.
 4. Put images in `Dropbox/Apps/<your app name>/`. They appear at the next cycle without a
    restart.
 
@@ -26,16 +28,87 @@ authorize, or the token will be issued without them.
 
 ## Running it
 
-Double-click the executable, or put a shortcut in `shell:startup` to start it with Windows.
-Any key or mouse click exits. It never exits on its own: a bad image is skipped, a dropped
-network falls back to the cache, and an empty folder shows a message and keeps checking.
+Double-click the application. Any key or mouse click exits. It never exits on its own: a bad
+image is skipped, a dropped network falls back to the cache, and an empty folder shows a
+message and keeps checking.
 
-Windows SmartScreen will warn once about an unsigned executable. Choose More info, then
-Run anyway.
+**macOS.** Install it once and it looks after itself:
+
+```
+./build/package-mac.sh            # dist/SavviedMatrix.app
+./build/install-mac.sh            # to /Applications, starts at login
+```
+
+The bundle carries its own .NET runtime, so the display machine needs nothing installed,
+and neither step needs sudo.
+
+The installer adds a launch agent at `~/Library/LaunchAgents/com.savvied.matrix.plist`
+that starts the app at login and restarts it if it crashes. It deliberately does *not*
+restart it after a normal exit: any key or click quits the app and returns success, so the
+kiosk stays closed when someone means to close it and you are never locked out of the
+machine. To start it again without logging out:
+
+```
+launchctl kickstart gui/$(id -u)/com.savvied.matrix
+```
+
+To remove the app and the agent, keeping your settings and token:
+
+```
+./build/install-mac.sh uninstall
+```
+
+### Starting without anyone logging in
+
+The launch agent starts the app at *login*, so after a power cut the kiosk waits at the
+login window. Two settings finish the job, both needing an administrator:
+
+```
+sudo pmset -a autorestart 1       # power comes back, the Mac comes back
+```
+
+and automatic login, under System Settings, Users & Groups, Automatic login. Note what
+that trades away: anyone who reboots the machine gets a logged-in session, and macOS
+stores the password in a recoverable form to do it. Reasonable for a wall display on a
+dedicated account, not for a machine with anything else on it. It also requires FileVault
+to be off.
+
+### If the picture looks cropped on the television
+
+Check the set's picture-size setting first. Most televisions overscan by three to five per
+cent unless told not to; the option is usually called Just Scan, Screen Fit, 1:1 or Full.
+The log says what the app actually drew:
+
+```
+Presenting 1920x1080px into 1920x1080 at 1x as 1920x1080px at 0,0 (1:1)
+```
+
+If that line says anything other than `(1:1)` at offset `0,0`, the app is at fault. If it
+says 1:1 and the edges are still missing, the television is.
+
+**Windows.** Put a shortcut in `shell:startup` to start it with Windows. SmartScreen will
+warn once about an unsigned executable: choose More info, then Run anyway.
+
+## Where the files live
+
+`config.json`, `token.json`, the image `cache/` and `SavviedMatrix.log` sit beside the
+executable, which is what makes the app a folder you can copy to a kiosk.
+
+macOS is the exception. An application there is a bundle and a bundle is meant to be
+read-only, so a bundled build keeps all four in
+`~/Library/Application Support/SavviedMatrix/` instead. A starting `config.json` is copied
+there on first run. This is also where to look for the log:
+
+```
+~/Library/Application Support/SavviedMatrix/SavviedMatrix.log
+```
+
+Running from the source tree with `dotnet run` uses the build output directory on every
+platform, so development is unaffected.
 
 ## Configuration
 
-`config.json` sits beside the executable. Command line options override it.
+Command line options override `config.json`.
 
 | Setting | Default | What it does |
 |---|---|---|
@@ -127,16 +200,16 @@ the outgoing image is still standing, the head and its trail are the rain itself
 the trail the incoming image has settled. The screen is never blank between images.
 
 Rain is off by default because it is the only part that costs work every frame. To decide
-whether the display PC can take it:
+whether the display machine can take it:
 
 ```
-SavviedMatrix.exe --rain
+SavviedMatrix --rain
 ```
 
 Let it run through a few images, then read `SavviedMatrix.log`. Each transition logs its
-average compose-and-paint time against the frame budget. On the development machine it
-measures about 9 ms against a 42 ms budget at 24 fps. If the average on your PC approaches
-the budget, drop `rain.fps` to 15 or `columns` to 128 and measure again.
+average compose-and-upload time against the frame budget. On an M4 Mac mini at 1920x1080 it
+measures about 1.5 ms against a 42 ms budget at 24 fps. If the average on your machine
+approaches the budget, drop `rain.fps` to 15 or `columns` to 128 and measure again.
 
 ## How the sound works
 
@@ -161,19 +234,49 @@ of the plinks landing slightly later behind the picture.
 
 ## Development
 
+Needs the .NET 10 SDK; `global.json` pins it.
+
 ```
-dotnet test                       # 258 tests
-dotnet run --project src/SavviedMatrix -- --folder .\testimages --size 1600x900 --rain
+dotnet test                       # 266 tests
+dotnet run --project src/SavviedMatrix -- --folder ./testimages --size 1600x900 --rain
 ```
 
 `--folder` bypasses Dropbox entirely, and `--size` previews the exact 1920x1080 television
-layout in a window. To rebuild the distributable:
+layout in a window, in real pixels whatever the display's scale factor is.
+
+To build the macOS bundle:
+
+```
+./build/package-mac.sh            # dist/SavviedMatrix.app, self-contained
+```
+
+To build the Windows distributable:
 
 ```
 dotnet publish src/SavviedMatrix -c Release -r win-x64 --self-contained true `
   -p:PublishSingleFile=true -p:PublishReadyToRun=true `
   -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -o dist
 ```
+
+### How it stays portable
+
+Nothing in the analysis, rain or synthesis touches a platform API; the boundary is four
+things, and each is one library rather than one per platform.
+
+| Concern | Library | Notes |
+|---|---|---|
+| Window, input, blitting | Avalonia | One window implementation on all three platforms |
+| Image decode, resize, EXIF | SkiaSharp | Ships with Avalonia, so it costs no extra dependency |
+| Glyph rasterising | SkiaSharp | Fonts are chosen per platform and then *measured*, not assumed |
+| Audio | SoundFlow (miniaudio) | CoreAudio, WASAPI or ALSA underneath; native library is in the package |
+
+The only per-platform code is display-sleep suppression, which has no portable equivalent:
+`SetThreadExecutionState` on Windows and an `IOPMAssertion` on macOS.
+
+Fonts are the one thing that genuinely differs. The app asks for Consolas on Windows, Menlo
+on macOS and DejaVu Sans Mono on Linux, falling back down a list and finally to whatever the
+system offers. Because the ramps are rebuilt at startup from the ink each character actually
+puts on screen, a substitution changes the texture slightly and breaks nothing.
 
 ## Layout
 
@@ -184,6 +287,6 @@ src/SavviedMatrix/
   Rain/       the falling-stream model and its compositor
   Render/     the glyph atlas and the pixel compositor
   Source/     Dropbox API, cache, and the local-folder development source
-  Ui/         the fullscreen form, phase machine, and display-sleep suppression
+  Ui/         the fullscreen window, phase machine, and display-sleep suppression
 specs/matrix/ the canonical spec, its tests, and the archived plan
 ```

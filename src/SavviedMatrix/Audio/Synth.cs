@@ -1,10 +1,8 @@
-using NAudio.Wave;
-
 namespace SavviedMatrix.Audio;
 
 /// <summary>
 /// The mixer and sample clock: a fixed pool of <see cref="Voice"/> objects, a queue of notes
-/// waiting for their sample, and the render loop that NAudio pulls on.
+/// waiting for their sample, and the render loop the audio device pulls on.
 /// <para>
 /// The sample counter is the only clock the music uses. The UI reads <see cref="Clock"/> when a
 /// phase begins and schedules the whole phase against it, so timing never depends on frame rate,
@@ -16,7 +14,7 @@ namespace SavviedMatrix.Audio;
 /// sound card callback kills playback for the rest of the run.
 /// </para>
 /// </summary>
-public sealed class Synth : ISampleProvider
+public sealed class Synth
 {
     /// <summary>Most notes that can be handed to one render pass; the rest wait for the next.</summary>
     private const int MaxDuePerBuffer = 512;
@@ -54,11 +52,11 @@ public sealed class Synth : ISampleProvider
         // 1/sqrt(n) is the usual compromise: uncorrelated voices land near unity, a lone note
         // is only a few dB down instead of the n-fold cut a flat 1/n would cost it.
         _mixGain = 1f / MathF.Sqrt(voices);
-
-        WaveFormat = WaveFormat.CreateIeeeFloatWaveFormat(sampleRate, 1);
     }
 
-    public WaveFormat WaveFormat { get; }
+    /// <summary>Mono. The plinks carry no stereo information, so a second channel would
+    /// only double the render cost for an identical signal.</summary>
+    public const int Channels = 1;
 
     public int SampleRate => _sampleRate;
 
@@ -132,8 +130,8 @@ public sealed class Synth : ISampleProvider
     }
 
     /// <summary>
-    /// The audio thread's entry point (NAudio 3 hands us a span). Always fills the whole buffer
-    /// and always returns its full length: returning short would end the stream.
+    /// The audio thread's entry point. Always fills the whole buffer and always returns its
+    /// full length: returning short would end the stream.
     /// </summary>
     public int Read(Span<float> buffer)
     {
@@ -151,7 +149,7 @@ public sealed class Synth : ISampleProvider
             Log.Error("Synth render failed", ex);
         }
 
-        // An infinite stream: always hand back a full buffer or NAudio stops playback.
+        // An infinite stream: always hand back a full buffer or the device stops playback.
         return count;
     }
 

@@ -364,8 +364,8 @@ public class SynthTests
     public void ReadFillsTheBufferAndAdvancesTheClock()
     {
         var synth = new Synth(Rate, 4) { MasterVolume = 1f };
-        Assert.Equal(Rate, synth.WaveFormat.SampleRate);
-        Assert.Equal(1, synth.WaveFormat.Channels);
+        Assert.Equal(Rate, synth.SampleRate);
+        Assert.Equal(1, Synth.Channels);
 
         var buf = new float[4410];
         int written = synth.Read(buf, 0, buf.Length);
@@ -397,7 +397,7 @@ public class SynthTests
         var buf = new float[4410];
         synth.Read(buf, 0, buf.Length);      // clock is now 4410
 
-        // NAudioOutput anchors phases at Clock - LatencySamples, which is deliberately behind.
+        // MiniAudioOutput anchors phases at Clock - LatencySamples, which is deliberately behind.
         synth.Schedule(new[] { new ScheduledNote(0.0, Osc(Waveform.Triangle, 440f)) }, 0);
         Array.Clear(buf);
         synth.Read(buf, 0, buf.Length);

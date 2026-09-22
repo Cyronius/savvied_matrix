@@ -1,14 +1,16 @@
 namespace SavviedMatrix;
 
 /// <summary>
-/// Append-only log beside the exe. Deliberately dumb: the kiosk runs unattended,
-/// and this is the only way to find out afterwards what it did.
+/// Append-only log in the app's data directory. Deliberately dumb: the kiosk runs
+/// unattended, and this is the only way to find out afterwards what it did.
 /// </summary>
 public static class Log
 {
     private static readonly object Gate = new();
-    private static readonly string Path =
-        System.IO.Path.Combine(AppContext.BaseDirectory, "SavviedMatrix.log");
+    private static readonly string Path = AppPaths.Combine("SavviedMatrix.log");
+
+    /// <summary>Where the log is being written, for the startup banner.</summary>
+    public static string FilePath => Path;
 
     private const long MaxBytes = 2 * 1024 * 1024;
 

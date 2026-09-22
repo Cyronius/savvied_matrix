@@ -1,4 +1,9 @@
-using NAudio.Wave;
+using SoundFlow.Abstracts;
+using SoundFlow.Abstracts.Devices;
+using SoundFlow.Backends.MiniAudio;
+using SoundFlow.Backends.MiniAudio.Devices;
+using SoundFlow.Enums;
+using SoundFlow.Structs;
 
 namespace SavviedMatrix.Audio;
 
@@ -50,35 +55,75 @@ public sealed class NullAudioOutput : IAudioOutput
 }
 
 /// <summary>
-/// Real output: a <see cref="Synth"/> feeding a NAudio <see cref="WaveOut"/>.
-/// NAudio is only the transport here - it pulls the float buffers the synth computes and hands
-/// them to the sound card. No sample data is loaded from anywhere.
+/// Adapts <see cref="Synth"/> to the device graph. The engine pulls this on its own audio
+/// thread and the synth fills the buffer; nothing else is in the path.
+/// </summary>
+internal sealed class SynthComponent : SoundComponent
+{
+    private readonly Synth _synth;
+
+    public SynthComponent(AudioEngine engine, AudioFormat format, Synth synth)
+        : base(engine, format)
+    {
+        _synth = synth;
+    }
+
+    public override string Name { get; set; } = "SavviedMatrix synth";
+
+    protected override void GenerateAudio(Span<float> buffer, int channels)
+    {
+        if (channels <= 1)
+        {
+            _synth.Read(buffer);
+            return;
+        }
+
+        // The device was asked for mono but handed us interleaved frames. Render one sample
+        // per frame and fan it out, rather than letting the synth fill the whole buffer:
+        // its sample clock counts frames, and the schedule the picture is aligned to would
+        // otherwise run fast by exactly the channel count.
+        int frames = buffer.Length / channels;
+        if (frames == 0) { buffer.Clear(); return; }
+
+        Span<float> mono = frames <= 4096 ? stackalloc float[frames] : new float[frames];
+        _synth.Read(mono);
+
+        for (int f = 0, i = 0; f < frames; f++)
+        {
+            float s = mono[f];
+            for (int c = 0; c < channels; c++) buffer[i++] = s;
+        }
+    }
+}
+
+/// <summary>
+/// Real output: a <see cref="Synth"/> feeding a miniaudio playback device.
+/// The engine is only the transport here - it pulls the float buffers the synth computes and
+/// hands them to the sound card. No sample data is loaded from anywhere.
 /// <para>
-/// <see cref="WaveOut"/> is deliberate: since NAudio 3 it is the event-callback player (what 2.x
-/// called <c>WaveOutEvent</c>), so buffers are refilled on its own background thread.
-/// <c>WaveOutWindow</c>, the window-message player, would deliver its callback on the UI thread
-/// and every repaint would stall the audio.
+/// miniaudio rather than a per-platform API: it resolves to CoreAudio on macOS, WASAPI on
+/// Windows and ALSA or PulseAudio on Linux, and the native library travels in the NuGet
+/// package, so a kiosk needs nothing installed beyond the app itself.
 /// </para>
 /// </summary>
-public sealed class NAudioOutput : IAudioOutput
+public sealed class MiniAudioOutput : IAudioOutput
 {
     /// <summary>
-    /// WaveOut below roughly this many milliseconds starves while the UI thread is composing a
-    /// frame, and a starved buffer is a tick in the output. The app spends around 8 ms a frame
-    /// blitting, so a configured latency under this is raised rather than honoured.
+    /// A device below roughly this many milliseconds starves while the UI thread is composing
+    /// a frame, and a starved buffer is a tick in the output. The app spends around 8 ms a
+    /// frame blitting, so a configured latency under this is raised rather than honoured.
     /// </summary>
     public const int MinLatencyMs = 60;
 
     private const int DefaultSampleRate = 44100;
 
     /// <summary>
-    /// NAudio 3 dropped <c>DesiredLatency</c> for the pair it was always made of: total latency
-    /// is <see cref="BufferCount"/> buffers of <c>BufferMilliseconds</c> each.
+    /// Total latency is <see cref="BufferCount"/> periods of <c>PeriodSizeInMilliseconds</c>.
     /// <para>
-    /// Four small buffers beat two large ones at the same total latency. What protects against a
-    /// glitch is how much audio is already queued when a buffer completes: with two buffers that
-    /// is one buffer (half the latency), with four it is three (three quarters). Same delay to
-    /// the ear, far more slack for the render thread to be late.
+    /// Four small buffers beat two large ones at the same total latency. What protects against
+    /// a glitch is how much audio is already queued when a buffer completes: with two buffers
+    /// that is one buffer (half the latency), with four it is three (three quarters). Same
+    /// delay to the ear, far more slack for the render thread to be late.
     /// </para>
     /// </summary>
     private const int BufferCount = 4;
@@ -86,20 +131,22 @@ public sealed class NAudioOutput : IAudioOutput
     private const int MinBufferMs = 15;
 
     private readonly Synth _synth;
-    private readonly WaveOut _device;
+    private readonly MiniAudioEngine _engine;
+    private readonly AudioPlaybackDevice _device;
+    private readonly SynthComponent _component;
     private readonly int _latencySamples;
 
     private volatile bool _available;
     private bool _disposed;
 
-    public NAudioOutput(SoundConfig config)
+    public MiniAudioOutput(SoundConfig config)
     {
         ArgumentNullException.ThrowIfNull(config);
 
         int latencyMs = Math.Max(MinLatencyMs, config.LatencyMs);
         int bufferMs = Math.Max(MinBufferMs, latencyMs / BufferCount);
 
-        // The device only delivers whole buffers, so this is the latency we actually get.
+        // The device only delivers whole periods, so this is the latency we actually get.
         int actualLatencyMs = bufferMs * BufferCount;
         _latencySamples = (int)((long)actualLatencyMs * DefaultSampleRate / 1000);
 
@@ -108,31 +155,57 @@ public sealed class NAudioOutput : IAudioOutput
             MasterVolume = config.Volume
         };
 
-        WaveOut? device = null;
+        MiniAudioEngine? engine = null;
+        AudioPlaybackDevice? device = null;
+
         try
         {
-            if (WaveOut.DeviceCount <= 0)
-                throw new InvalidOperationException("No waveOut device is present.");
+            engine = new MiniAudioEngine();
+            engine.UpdateAudioDevicesInfo();
 
-            device = new WaveOut
+            if (engine.PlaybackDevices.Length == 0)
+                throw new InvalidOperationException("No playback device is present.");
+
+            var format = new AudioFormat
             {
-                NumberOfBuffers = BufferCount,
-                BufferMilliseconds = bufferMs
+                Format = SampleFormat.F32,
+                Channels = Synth.Channels,
+                SampleRate = DefaultSampleRate
             };
-            device.PlaybackStopped += OnPlaybackStopped;
-            device.Init(_synth);
-            device.Play();
+
+            var deviceConfig = new MiniAudioDeviceConfig
+            {
+                Periods = BufferCount,
+                PeriodSizeInMilliseconds = (uint)bufferMs,
+
+                // The synth always fills the whole buffer, so pre-silencing it is a memset
+                // of the entire period that is immediately overwritten.
+                NoPreSilencedOutputBuffer = true
+            };
+
+            // Null asks for the system default, which is what follows the operator's own
+            // output choice when a TV is plugged in or unplugged.
+            device = engine.InitializePlaybackDevice(null, format, deviceConfig);
+
+            _component = new SynthComponent(engine, format, _synth);
+            device.MasterMixer.AddComponent(_component);
+            device.Start();
         }
         catch (Exception ex)
         {
             device?.Dispose();
+            engine?.Dispose();
             throw new AudioUnavailableException($"Could not open an audio device: {ex.Message}", ex);
         }
 
-        _device = device ?? throw new AudioUnavailableException("Could not open an audio device.");
-
+        _engine = engine;
+        _device = device;
         _available = true;
-        Log.Info($"Audio ready: {DefaultSampleRate} Hz mono, {actualLatencyMs} ms latency, {_synth.Polyphony} voices.");
+
+        var name = device.Info?.Name ?? "default device";
+        Log.Info(
+            $"Audio ready: {name}, {DefaultSampleRate} Hz mono, "
+            + $"{actualLatencyMs} ms latency, {_synth.Polyphony} voices.");
     }
 
     public long Clock => _synth.Clock;
@@ -154,16 +227,6 @@ public sealed class NAudioOutput : IAudioOutput
 
     public void Panic() => _synth.Panic();
 
-    private void OnPlaybackStopped(object? sender, StoppedEventArgs e)
-    {
-        _available = false;
-
-        if (e.Exception is not null)
-            Log.Error("Audio playback stopped", e.Exception);
-        else if (!_disposed)
-            Log.Warn("Audio playback stopped unexpectedly; continuing without sound.");
-    }
-
     public void Dispose()
     {
         if (_disposed) return;
@@ -172,10 +235,12 @@ public sealed class NAudioOutput : IAudioOutput
 
         try
         {
-            _device.PlaybackStopped -= OnPlaybackStopped;
             _synth.Panic();
             _device.Stop();
+            _device.MasterMixer.RemoveComponent(_component);
+            _component.Dispose();
             _device.Dispose();
+            _engine.Dispose();
         }
         catch (Exception ex)
         {
@@ -198,11 +263,18 @@ public static class AudioOutput
 
         try
         {
-            return new NAudioOutput(config);
+            return new MiniAudioOutput(config);
         }
         catch (AudioUnavailableException ex)
         {
             Log.Warn($"Sound disabled: {ex.Message}");
+            return new NullAudioOutput();
+        }
+        catch (Exception ex)
+        {
+            // A missing or unloadable native library surfaces here rather than as
+            // AudioUnavailableException, and must not take the slideshow down with it.
+            Log.Warn($"Sound disabled: {ex.GetType().Name}: {ex.Message}");
             return new NullAudioOutput();
         }
     }

@@ -1,16 +1,20 @@
+using Avalonia;
+using Avalonia.Controls;
+using Avalonia.Input;
+using Avalonia.Layout;
+using Avalonia.Media;
+using SavviedMatrix.Ui;
+
 namespace SavviedMatrix.Source.Dropbox;
 
 /// <summary>
-/// Collects the authorization code Dropbox shows in the browser. A dialog rather than a console
-/// prompt because the app is a WinExe with no console attached, and code-only rather than a
-/// designer form so the whole authorization flow stays readable in one place.
+/// Collects the authorization code Dropbox shows in the browser. A window rather than a
+/// console prompt because the app has no console attached when it is double-clicked, and
+/// code-only rather than a markup file so the whole authorization flow stays readable in
+/// one place.
 /// </summary>
-public sealed class AuthDialog : Form
+public sealed class AuthDialog : Window
 {
-    private static readonly Color Background = Color.FromArgb(12, 16, 12);
-    private static readonly Color Foreground = Color.FromArgb(180, 255, 180);
-    private static readonly Color FieldBackground = Color.FromArgb(24, 32, 24);
-
     private readonly TextBox _input;
 
     /// <summary>The pasted code, or null if the operator cancelled.</summary>
@@ -18,85 +22,101 @@ public sealed class AuthDialog : Form
 
     public AuthDialog()
     {
-        Text = "SavviedMatrix - Dropbox authorization";
-        FormBorderStyle = FormBorderStyle.FixedDialog;
-        StartPosition = FormStartPosition.CenterScreen;
-        MinimizeBox = false;
-        MaximizeBox = false;
-        BackColor = Background;
-        ForeColor = Foreground;
-        ClientSize = new Size(520, 200);
-        Padding = new Padding(16);
+        Title = "SavviedMatrix - Dropbox authorization";
+        Width = 520;
+        SizeToContent = SizeToContent.Height;
+        CanResize = false;
+        WindowStartupLocation = WindowStartupLocation.CenterScreen;
+        Background = MessageWindow.Panel;
 
-        var label = new Label
+        var label = new TextBlock
         {
-            Text = "A browser window has opened for Dropbox.\r\n\r\n"
-                 + "Click Allow, then copy the authorization code Dropbox shows\r\n"
+            Text = "A browser window has opened for Dropbox.\n\n"
+                 + "Click Allow, then copy the authorization code Dropbox shows\n"
                  + "and paste it below.",
-            AutoSize = false,
-            Dock = DockStyle.Top,
-            Height = 84,
-            ForeColor = Foreground,
-            BackColor = Background
-        };
-
-        var okButton = new Button
-        {
-            Text = "OK",
-            DialogResult = DialogResult.OK,
-            AutoSize = true,
-            Enabled = false,
-            ForeColor = Foreground,
-            BackColor = FieldBackground,
-            FlatStyle = FlatStyle.Flat
-        };
-
-        var cancelButton = new Button
-        {
-            Text = "Cancel",
-            DialogResult = DialogResult.Cancel,
-            AutoSize = true,
-            ForeColor = Foreground,
-            BackColor = FieldBackground,
-            FlatStyle = FlatStyle.Flat
+            TextWrapping = TextWrapping.Wrap,
+            Foreground = MessageWindow.Ink
         };
 
         _input = new TextBox
         {
-            Dock = DockStyle.Top,
-            Font = new Font(FontFamily.GenericMonospace, 10f),
-            BackColor = FieldBackground,
-            ForeColor = Foreground,
-            BorderStyle = BorderStyle.FixedSingle
+            FontFamily = FontFamily.Parse("monospace"),
+            Background = MessageWindow.Field,
+            Foreground = MessageWindow.Ink,
+            CaretBrush = MessageWindow.Ink,
+            PlaceholderText = "authorization code"
         };
-        _input.TextChanged += (_, _) => okButton.Enabled = _input.Text.Trim().Length > 0;
 
-        okButton.Click += (_, _) => Code = _input.Text.Trim();
-
-        var buttons = new FlowLayoutPanel
+        var okButton = new Button
         {
-            Dock = DockStyle.Bottom,
-            FlowDirection = FlowDirection.RightToLeft,
-            Height = 48,
-            BackColor = Background,
-            Padding = new Padding(0, 8, 0, 0)
+            Content = "OK",
+            IsEnabled = false,
+            IsDefault = true,
+            Foreground = MessageWindow.Ink,
+            Background = MessageWindow.Field,
+            Padding = new Thickness(20, 6)
         };
-        buttons.Controls.Add(cancelButton);
-        buttons.Controls.Add(okButton);
 
-        // Docked controls fill from the outside in, so add the innermost one first.
-        Controls.Add(_input);
-        Controls.Add(label);
-        Controls.Add(buttons);
+        var cancelButton = new Button
+        {
+            Content = "Cancel",
+            IsCancel = true,
+            Foreground = MessageWindow.Ink,
+            Background = MessageWindow.Field,
+            Padding = new Thickness(20, 6)
+        };
 
-        AcceptButton = okButton;
-        CancelButton = cancelButton;
+        _input.TextChanged += (_, _) =>
+            okButton.IsEnabled = !string.IsNullOrWhiteSpace(_input.Text);
+
+        okButton.Click += (_, _) =>
+        {
+            Code = _input.Text?.Trim();
+            Close();
+        };
+
+        cancelButton.Click += (_, _) =>
+        {
+            Code = null;
+            Close();
+        };
+
+        Content = new StackPanel
+        {
+            Margin = new Thickness(16),
+            Spacing = 12,
+            Children =
+            {
+                label,
+                _input,
+                new StackPanel
+                {
+                    Orientation = Orientation.Horizontal,
+                    HorizontalAlignment = HorizontalAlignment.Right,
+                    Spacing = 8,
+                    Children = { cancelButton, okButton }
+                }
+            }
+        };
     }
 
-    protected override void OnShown(EventArgs e)
+    protected override void OnOpened(EventArgs e)
     {
-        base.OnShown(e);
+        base.OnOpened(e);
         Activate();
         _input.Focus();
+    }
+
+    /// <summary>Escape cancels, which is what the platform's own dialogs do.</summary>
+    protected override void OnKeyDown(KeyEventArgs e)
+    {
+        if (e.Key == Key.Escape)
+        {
+            Code = null;
+            Close();
+            return;
+        }
+
+        base.OnKeyDown(e);
     }
 }

@@ -9,7 +9,7 @@ namespace SavviedMatrix.Source.Dropbox;
 public record DropboxToken(string RefreshToken, string AccountId, DateTimeOffset ObtainedAt);
 
 /// <summary>
-/// Reads and writes <c>token.json</c> beside the exe. The kiosk is authorized once by hand
+/// Reads and writes <c>token.json</c> in the app's data directory. The kiosk is authorized once by hand
 /// (<c>--auth</c>) and must survive reboots without anyone signing in again, so the token
 /// lives on disk rather than in memory or in the registry.
 /// </summary>
@@ -23,7 +23,7 @@ public static class DropboxTokenStore
     };
 
     /// <summary>Full path of the token file.</summary>
-    public static string TokenPath => Path.Combine(AppContext.BaseDirectory, "token.json");
+    public static string TokenPath => AppPaths.Combine("token.json");
 
     public static bool Exists() => File.Exists(TokenPath);
 

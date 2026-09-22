@@ -1,10 +1,8 @@
-using System.Drawing;
-using System.Drawing.Drawing2D;
-using System.Drawing.Imaging;
 using SavviedMatrix.Audio;
 using SavviedMatrix.Core;
 using SavviedMatrix.Render;
 using SavviedMatrix.Source;
+using SkiaSharp;
 
 namespace SavviedMatrix.Ascii;
 
@@ -15,8 +13,6 @@ namespace SavviedMatrix.Ascii;
 /// </summary>
 public sealed class FrameBuilder
 {
-    private const int ExifOrientationId = 0x0112;
-
     private readonly GridGeometry _geometry;
     private readonly AppConfig _config;
     private readonly GlyphSet _glyphs;
@@ -70,8 +66,7 @@ public sealed class FrameBuilder
 
     public Frame BuildFromFile(string path, string name)
     {
-        using var source = new Bitmap(path);
-        ApplyExifOrientation(source);
+        using var source = DecodeOriented(path);
 
         bool halfBlock = _mode == GlyphMode.HalfBlock;
 
@@ -136,90 +131,201 @@ public sealed class FrameBuilder
     }
 
     /// <summary>
-    /// One bilinear resize straight down to the character grid. This is the only pass over
-    /// the full-resolution pixels, which is what keeps a large photo cheap on a weak CPU.
+    /// Decodes an image and puts it the right way up. Public so the orientation handling
+    /// can be tested directly against images carrying each EXIF tag.
+    /// <para>
+    /// Phone photographs are routinely stored sideways with an EXIF tag saying which way is
+    /// up; ignoring it shows them rotated. The tag is applied as a single transformed draw
+    /// rather than as a sequence of rotates and flips, and skipped entirely for the usual
+    /// case of an upright image.
+    /// </para>
     /// </summary>
-    private static PixelGrid Downsample(Bitmap source, int width, int height)
+    public static SKBitmap DecodeOriented(string path)
+    {
+        using var codec = SKCodec.Create(path)
+            ?? throw new InvalidOperationException("Not an image this build can decode.");
+
+        var origin = codec.EncodedOrigin;
+
+        // Bgra8888 is B,G,R,A in memory, which on a little-endian machine reads back as the
+        // 0xAARRGGBB int PixelGrid expects, so no per-pixel conversion is ever needed.
+        var info = new SKImageInfo(
+            codec.Info.Width, codec.Info.Height, SKColorType.Bgra8888, SKAlphaType.Premul);
+
+        var decoded = SKBitmap.Decode(codec, info)
+            ?? throw new InvalidOperationException("The image could not be decoded.");
+
+        if (origin == SKEncodedOrigin.TopLeft) return decoded;
+
+        try
+        {
+            bool transposed = origin is SKEncodedOrigin.LeftTop or SKEncodedOrigin.RightTop
+                or SKEncodedOrigin.RightBottom or SKEncodedOrigin.LeftBottom;
+
+            int w = decoded.Width;
+            int h = decoded.Height;
+
+            var oriented = new SKBitmap(new SKImageInfo(
+                transposed ? h : w, transposed ? w : h, SKColorType.Bgra8888, SKAlphaType.Premul));
+
+            using (var canvas = new SKCanvas(oriented))
+            {
+                ApplyOrigin(canvas, origin, w, h);
+
+                // The orientation draw is 1:1 and axis-aligned, so there is nothing to
+                // interpolate and nearest keeps it exact.
+                canvas.DrawBitmap(decoded, 0, 0, new SKSamplingOptions(SKFilterMode.Nearest));
+            }
+
+            return oriented;
+        }
+        finally
+        {
+            decoded.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Sets the canvas transform that maps the stored pixels onto the displayed ones.
+    /// Canvas operations compose outermost first, so each case reads as the outer move
+    /// followed by the inner one.
+    /// </summary>
+    private static void ApplyOrigin(SKCanvas canvas, SKEncodedOrigin origin, int w, int h)
+    {
+        switch (origin)
+        {
+            case SKEncodedOrigin.TopRight:      // mirrored
+                canvas.Translate(w, 0);
+                canvas.Scale(-1, 1);
+                break;
+
+            case SKEncodedOrigin.BottomRight:   // rotated 180
+                canvas.Translate(w, h);
+                canvas.Scale(-1, -1);
+                break;
+
+            case SKEncodedOrigin.BottomLeft:    // mirrored vertically
+                canvas.Translate(0, h);
+                canvas.Scale(1, -1);
+                break;
+
+            case SKEncodedOrigin.LeftTop:       // transposed
+                canvas.Scale(-1, 1);
+                canvas.RotateDegrees(90);
+                break;
+
+            case SKEncodedOrigin.RightTop:      // rotated 90 clockwise
+                canvas.Translate(h, 0);
+                canvas.RotateDegrees(90);
+                break;
+
+            case SKEncodedOrigin.RightBottom:   // transverse
+                canvas.Translate(h, w);
+                canvas.Scale(1, -1);
+                canvas.RotateDegrees(90);
+                break;
+
+            case SKEncodedOrigin.LeftBottom:    // rotated 90 anticlockwise
+                canvas.Translate(0, w);
+                canvas.Scale(-1, -1);
+                canvas.RotateDegrees(90);
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Resizes down to the character grid and reads the result out as a plain pixel buffer.
+    /// <para>
+    /// The reduction is done by repeated halving until the image is within a factor of two
+    /// of the target, then one filtered step onto the exact size. A resampler has a fixed
+    /// kernel a few pixels wide, so asking it to go from four thousand pixels to three
+    /// hundred in one step reads a handful of the thousands of pixels each cell covers and
+    /// turns a detailed photograph into noise. Halving keeps every source pixel contributing,
+    /// which is what an area average would do, at a fraction of the cost.
+    /// </para>
+    /// </summary>
+    private static PixelGrid Downsample(SKBitmap source, int width, int height)
     {
         width = Math.Max(1, width);
         height = Math.Max(1, height);
 
-        using var small = new Bitmap(width, height, PixelFormat.Format32bppArgb);
-        using (var g = Graphics.FromImage(small))
-        {
-            g.CompositingMode = CompositingMode.SourceCopy;
-            g.CompositingQuality = CompositingQuality.HighSpeed;
-            g.InterpolationMode = InterpolationMode.HighQualityBilinear;
-            g.PixelOffsetMode = PixelOffsetMode.HighQuality;
-            g.SmoothingMode = SmoothingMode.None;
-            g.DrawImage(source, new Rectangle(0, 0, width, height));
-        }
+        var sampling = new SKSamplingOptions(SKCubicResampler.Mitchell);
 
-        var buffer = new int[width * height];
-        var data = small.LockBits(
-            new Rectangle(0, 0, width, height),
-            ImageLockMode.ReadOnly,
-            PixelFormat.Format32bppArgb);
+        SKBitmap current = source;
+        SKBitmap? owned = null;
+
         try
         {
-            if (data.Stride == width * 4)
+            while (current.Width >= width * 2 && current.Height >= height * 2
+                   && current.Width > 1 && current.Height > 1)
             {
-                System.Runtime.InteropServices.Marshal.Copy(data.Scan0, buffer, 0, buffer.Length);
+                int halfWidth = Math.Max(width, current.Width / 2);
+                int halfHeight = Math.Max(height, current.Height / 2);
+
+                var step = current.Resize(
+                    new SKImageInfo(halfWidth, halfHeight, SKColorType.Bgra8888, SKAlphaType.Premul),
+                    sampling);
+
+                if (step is null) break;
+
+                owned?.Dispose();
+                owned = step;
+                current = step;
+            }
+
+            SKBitmap final;
+            bool finalOwned = false;
+
+            if (current.Width == width && current.Height == height)
+            {
+                final = current;
             }
             else
             {
-                for (int y = 0; y < height; y++)
-                {
-                    var rowStart = data.Scan0 + y * data.Stride;
-                    System.Runtime.InteropServices.Marshal.Copy(rowStart, buffer, y * width, width);
-                }
+                final = current.Resize(
+                    new SKImageInfo(width, height, SKColorType.Bgra8888, SKAlphaType.Premul),
+                    sampling) ?? throw new InvalidOperationException(
+                        $"Could not resize the image to {width}x{height}.");
+
+                finalOwned = true;
+            }
+
+            try
+            {
+                return ToPixelGrid(final, width, height);
+            }
+            finally
+            {
+                if (finalOwned) final.Dispose();
             }
         }
         finally
         {
-            small.UnlockBits(data);
+            owned?.Dispose();
+        }
+    }
+
+    /// <summary>Copies a Bgra8888 bitmap into the plain ARGB buffer the analysis works over.</summary>
+    private static PixelGrid ToPixelGrid(SKBitmap bitmap, int width, int height)
+    {
+        var buffer = new int[width * height];
+        var bytes = bitmap.GetPixelSpan();
+        int rowBytes = bitmap.RowBytes;
+
+        for (int y = 0; y < height; y++)
+        {
+            var row = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, int>(
+                bytes.Slice(y * rowBytes, width * 4));
+
+            row.CopyTo(buffer.AsSpan(y * width, width));
+        }
+
+        if (!BitConverter.IsLittleEndian)
+        {
+            for (int i = 0; i < buffer.Length; i++)
+                buffer[i] = System.Buffers.Binary.BinaryPrimitives.ReverseEndianness(buffer[i]);
         }
 
         return new PixelGrid(buffer, width, height);
-    }
-
-    /// <summary>
-    /// Rotates according to the EXIF orientation tag. Phone photographs are routinely
-    /// stored sideways with a tag saying which way is up; ignoring it shows them rotated.
-    /// </summary>
-    public static void ApplyExifOrientation(Image image)
-    {
-        try
-        {
-            if (Array.IndexOf(image.PropertyIdList, ExifOrientationId) < 0) return;
-
-            var prop = image.GetPropertyItem(ExifOrientationId);
-            if (prop?.Value is null || prop.Value.Length < 2) return;
-
-            int orientation = BitConverter.ToUInt16(prop.Value, 0);
-
-            var transform = orientation switch
-            {
-                2 => RotateFlipType.RotateNoneFlipX,
-                3 => RotateFlipType.Rotate180FlipNone,
-                4 => RotateFlipType.Rotate180FlipX,
-                5 => RotateFlipType.Rotate90FlipX,
-                6 => RotateFlipType.Rotate90FlipNone,
-                7 => RotateFlipType.Rotate270FlipX,
-                8 => RotateFlipType.Rotate270FlipNone,
-                _ => RotateFlipType.RotateNoneFlipNone
-            };
-
-            if (transform != RotateFlipType.RotateNoneFlipNone)
-            {
-                image.RotateFlip(transform);
-                image.RemovePropertyItem(ExifOrientationId);
-            }
-        }
-        catch (Exception ex)
-        {
-            // An unreadable orientation tag is not a reason to skip the picture.
-            Log.Warn($"EXIF orientation could not be read: {ex.Message}");
-        }
     }
 }

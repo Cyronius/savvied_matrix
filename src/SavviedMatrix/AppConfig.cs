@@ -1,3 +1,4 @@
+using System.Drawing;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -96,14 +97,34 @@ public sealed class AppConfig
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase
     };
 
-    public static string ConfigPath => Path.Combine(AppContext.BaseDirectory, "config.json");
+    public static string ConfigPath => AppPaths.Combine("config.json");
 
     public static AppConfig Load()
     {
         var path = ConfigPath;
+
+        // A bundled build ships a default config inside itself and copies it out on first
+        // run, so the operator has one file to edit in a place that survives an update.
+        if (!File.Exists(path) && AppPaths.InsideAppBundle)
+        {
+            try
+            {
+                var shipped = AppPaths.Installed("config.json");
+                if (File.Exists(shipped))
+                {
+                    File.Copy(shipped, path);
+                    Log.Info($"Wrote a starting config.json to {path}.");
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Warn($"Could not seed config.json ({ex.Message}); using defaults.");
+            }
+        }
+
         if (!File.Exists(path))
         {
-            Log.Warn("No config.json beside the executable; using defaults.");
+            Log.Warn($"No config.json at {path}; using defaults.");
             return new AppConfig();
         }
 
@@ -246,8 +267,12 @@ public sealed class AppConfig
                     var v = Next("--mode");
                     if (v is null) return err;
                     var m = v.ToLowerInvariant();
-                    if (m is not ("ramp" or "dense" or "blocks" or "katakana"))
-                        return $"--mode expects ramp, dense, blocks or katakana (got '{v}').";
+                    // Kept in step with GlyphSet.ParseMode, including its aliases; the
+                    // usage text and the README both offer half, so rejecting it here
+                    // made a documented mode reachable only from config.json.
+                    if (m is not ("ramp" or "dense" or "blocks" or "katakana"
+                        or "half" or "halfblock" or "half-block"))
+                        return $"--mode expects ramp, dense, blocks, half or katakana (got '{v}').";
                     GlyphMode = m;
                     break;
                 }
@@ -321,7 +346,7 @@ public sealed class AppConfig
     public const string Usage = """
         SavviedMatrix - Matrix ASCII image viewer
 
-          SavviedMatrix.exe [options]
+          SavviedMatrix [options]
 
           --auth              Run the one-time Dropbox authorization and exit.
           --folder <path>     Read images from a local directory instead of Dropbox.
